@@ -1,0 +1,13 @@
+interface:
+  display_name: "Create RITSDEV Sites"
+  short_description: "Deploy private network sites with agents"
+  default_prompt: "Use $create-ritsdev to build, preview, and deploy this project to the private network."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "create-ritsdev"
+      description: "Public control plane for private RITSDEV Sites deployments"
+      transport: "streamable_http"
+      url: "{{PLATFORM_ORIGIN}}/mcp"
+policy:
+  allow_implicit_invocation: true

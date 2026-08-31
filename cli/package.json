@@ -1,0 +1,55 @@
+{
+    "name": "@uetuluk/create-cli",
+    "version": "1.0.0",
+    "description": "CLI for building and deploying private network sites on a create-ritsdev platform.",
+    "type": "module",
+    "bin": {
+        "ritsdev": "dist/cli.js"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "engines": {
+        "node": ">=20"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "keywords": [
+        "sites",
+        "platform",
+        "cli",
+        "ritsdev"
+    ],
+    "author": "uetuluk",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/uetuluk/create-public.git",
+        "directory": "cli"
+    },
+    "homepage": "https://github.com/uetuluk/create-public/tree/main/cli#readme",
+    "bugs": {
+        "url": "https://github.com/uetuluk/create-public/issues"
+    },
+    "scripts": {
+        "build": "esbuild src/cli.ts --bundle --outfile=dist/cli.js --platform=node --format=esm --packages=external --banner:js=\"#!/usr/bin/env node\" && chmod +x dist/cli.js && npm run build:standalone",
+        "check": "tsc -p tsconfig.json --noEmit",
+        "dev": "tsx src/cli.ts",
+        "prepublishOnly": "npm run check && npm run build",
+        "build:standalone": "esbuild src/cli.ts --bundle --outfile=dist/ritsdev.cjs --platform=node --format=cjs --banner:js=\"#!/usr/bin/env node\" --legal-comments=none && chmod +x dist/ritsdev.cjs"
+    },
+    "dependencies": {
+        "cac": "^6.7.14",
+        "picocolors": "^1.1.1",
+        "prompts": "^2.4.2"
+    },
+    "devDependencies": {
+        "@types/node": "^24.0.0",
+        "@types/prompts": "^2.4.9",
+        "esbuild": "^0.28.1",
+        "tsx": "^4.23.1",
+        "typescript": "^5.9.3"
+    }
+}

@@ -1,0 +1,17 @@
+# The platform image builds from the repository root so it can bundle the CLI
+# alongside the server. Everything below is either irrelevant to that build or
+# must never enter an image layer.
+.git
+**/node_modules
+**/dist
+teenybase-fork
+tenants
+docs
+deploy/.env
+deploy/.env.*
+deploy/caddy
+deploy/render
+deploy/scripts
+**/*.tar.gz
+**/*.tgz
+**/.DS_Store

@@ -1,0 +1,63 @@
+# Overlay for the public demo instance.
+#
+#   docker compose -f compose.yaml -f compose.demo.yaml up -d
+#
+# The demo differs from a private-network installation in two ways that matter,
+# and both are configuration rather than a fork.
+#
+# It runs on a single VPS with one public IP and no LAN, so the topology the
+# main stack assumes — an apex published through a tunnel, a wildcard resolving
+# to an address unroutable from the internet — has nothing to stand on. Caddy
+# serves both names on the public interface and gets its certificates by DNS-01,
+# which it needed for the wildcard regardless. `cloudflared` is simply not
+# started; it sits behind the `public` profile, so this needs no override.
+#
+# And nobody is expected to host anything real here. `MAX_ACCESS_MODE=owner`
+# means an ordinary account's projects are visible to its owner alone after
+# signing in, while operators keep the full ladder so curated examples can still
+# be listed. The limits below are cut to match that: a handful of tiny
+# databases, almost no objects, one build at a time.
+#
+# What this overlay does NOT do is weaken an isolation boundary. Per-project
+# networks, the executor's lack of egress, the build proxy and the site review
+# are all unchanged — a demo open to strangers needs those more than a private
+# deployment does, not less.
+
+services:
+  postgres:
+    # A few demo databases holding almost nothing, where the default 1g is sized
+    # for real tenants. postgres already defaults to max_connections=100 and
+    # shared_buffers=128MB, which suit this, so only the ceiling changes.
+    mem_limit: 512m
+
+  rustfs:
+    # Object storage for a demo that stores almost no objects.
+    mem_limit: 512m
+
+  executor:
+    mem_limit: 448m
+    environment:
+      # One build at a time. A queued build is a fine demo experience; two
+      # concurrent builds plus a Playwright render is an OOM kill.
+      EXECUTOR_CONCURRENCY: 1
+
+  gateway:
+    mem_limit: 256m
+
+  platform:
+    mem_limit: 320m
+
+  caddy:
+    mem_limit: 160m
+    # One public interface, so both the apex and the wildcard are served here.
+    # LAN_BIND_IP is the VPS's public address on this deployment.
+    ports:
+      - "${LAN_BIND_IP:?set LAN_BIND_IP to the VPS public IP}:80:80"
+      - "${LAN_BIND_IP:?set LAN_BIND_IP}:443:443"
+      - "${LAN_BIND_IP:?set LAN_BIND_IP}:443:443/udp"
+
+  # Alerts leave over HTTPS through Cloudflare Email Sending, because outbound
+  # port 25 is blocked on this provider by default. Nothing needs to relay
+  # locally, so the relay is replaced by a no-op rather than started.
+  smtp-relay:
+    profiles: [unused]

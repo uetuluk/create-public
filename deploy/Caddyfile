@@ -1,0 +1,62 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$GATEWAY_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		propagation_timeout 2m
+	}
+	encode zstd gzip
+	request_body {
+		max_size 30MB
+	}
+	# Defence in depth only. The real control is that metrics listen on their
+	# own port: cloudflared reaches platform:3000 directly and never passes
+	# through Caddy, so this rule cannot protect the tunnel.
+	respond /metrics* 404
+	reverse_proxy platform:3000 {
+		header_up -CF-Connecting-IP
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+*.{$GATEWAY_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		propagation_timeout 2m
+	}
+	encode zstd gzip
+	request_body {
+		max_size 30MB
+	}
+	log {
+		output file /var/log/caddy/site-access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+		format json
+	}
+	# The logged-out gallery, served by the control plane rather than by the
+	# gateway. It lives on the wildcard because that is what makes it
+	# network-only: the wildcard resolves, publicly, to LAN_BIND_IP,
+	# which does not route from the internet, and this host is deliberately
+	# absent from the Cloudflare Tunnel. Matched inside this block so it reuses
+	# the wildcard certificate instead of asking for one of its own.
+	#
+	# The edge token goes up with it. The control plane verifies it, so a
+	# request that reached that process by any other path is refused even if it
+	# carries this Host header.
+	@showcase host showcase.{$GATEWAY_DOMAIN}
+	reverse_proxy @showcase platform:3000 {
+		header_up -CF-Connecting-IP
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Ritsdev-Edge-Token {env.EDGE_PROXY_SECRET}
+	}
+
+	reverse_proxy gateway:3001 {
+		header_up -CF-Connecting-IP
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Ritsdev-Edge-Token {env.EDGE_PROXY_SECRET}
+	}
+}

@@ -1,0 +1,25 @@
+# Local data volumes (bind-mounted into containers)
+data/
+
+# Shared infrastructure secrets and local migration backups. Only the
+# reviewed template is allowed into Git.
+deploy/.env*
+!deploy/.env.example
+
+# Node
+node_modules/
+*.log
+
+# OS
+.DS_Store
+
+# Retired local Teenybase checkout; no v1 Sites code references it.
+teenybase-fork/
+deploy/compose.override.yaml
+cli/dist/
+cli/node_modules/
+deploy/platform/dist/
+deploy/platform/node_modules/
+
+# Claude Code agent worktrees and local session state.
+.claude/

@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  platform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # The neutrality and compose-env guards shell out to `git ls-files`, so
+        # they need a real checkout rather than an exported tree.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+        working-directory: deploy/platform
+      - run: npm run check
+        working-directory: deploy/platform
+      - run: npm test
+        working-directory: deploy/platform
+
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+        working-directory: cli
+      - run: npm run check
+        working-directory: cli

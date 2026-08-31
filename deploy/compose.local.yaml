@@ -1,0 +1,42 @@
+# Overlay for trying the platform on a laptop.
+#
+#   docker compose -f compose.yaml -f compose.local.yaml up -d --no-build
+#
+# The stack normally sits behind Caddy, which terminates TLS for the apex and
+# the wildcard and gets its certificates by DNS-01 through Cloudflare. That is
+# right for a deployment and wrong for a trial: it needs a real domain, a real
+# Cloudflare zone and a real API token before anything answers at all.
+#
+# So this overlay takes Caddy out of the path and publishes the two application
+# ports on the loopback interface instead. No TLS, no DNS, no certificates —
+# and no exposure either, since binding 127.0.0.1 means these ports are not
+# reachable from the network the machine is on.
+#
+# What this does NOT change: every isolation boundary the platform relies on.
+# Per-project networks, the executor's missing egress, the build proxy and the
+# site review all behave exactly as they do in a deployment. A trial that
+# quietly switched those off would be demonstrating something else.
+
+services:
+  # Caddy needs Cloudflare credentials to issue anything, so it is not started.
+  # The Caddyfile is unchanged and unread here.
+  caddy:
+    profiles: [unused]
+
+  # No relay: alerts are not the interesting part of a trial, and nothing here
+  # can reach port 25 anyway.
+  smtp-relay:
+    profiles: [unused]
+
+  platform:
+    # Loopback only. The bare port would otherwise be offered to every machine
+    # sharing the network, without the edge token check Caddy normally applies.
+    ports:
+      - "127.0.0.1:${LOCAL_PLATFORM_PORT:-3000}:3000"
+
+  gateway:
+    # Deployed project sites are served here, addressed by Host header. There
+    # is no wildcard DNS on a laptop, so reaching one means saying which:
+    #   curl -H 'Host: my-site.sites.localhost' http://127.0.0.1:3001/
+    ports:
+      - "127.0.0.1:${LOCAL_GATEWAY_PORT:-3001}:3001"

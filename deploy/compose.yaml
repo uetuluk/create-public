@@ -1,0 +1,588 @@
+name: ritsdev
+
+networks:
+  data-control:
+    name: ritsdev_data_control
+    internal: true
+    ipam:
+      config: [{subnet: "${DATA_CONTROL_SUBNET:-192.168.64.0/28}"}]
+  storage-control:
+    name: ritsdev_storage_control
+    internal: true
+    ipam:
+      config: [{subnet: "${STORAGE_CONTROL_SUBNET:-192.168.64.16/28}"}]
+  root-edge:
+    name: ritsdev_root_edge
+    internal: true
+    ipam:
+      config: [{subnet: "${ROOT_EDGE_SUBNET:-192.168.64.32/28}"}]
+  site-edge:
+    name: ritsdev_site_edge
+    internal: true
+    ipam:
+      config: [{subnet: "${SITE_EDGE_SUBNET:-192.168.64.48/28}"}]
+  render:
+    name: ritsdev_render
+    internal: true
+    ipam:
+      config: [{subnet: "${RENDER_SUBNET:-192.168.64.64/28}"}]
+  public-control:
+    name: ritsdev_public_control
+    ipam:
+      config: [{subnet: "${PUBLIC_CONTROL_SUBNET:-192.168.64.80/28}"}]
+  certificate-egress:
+    name: ritsdev_certificate_egress
+    ipam:
+      config: [{subnet: "${CERTIFICATE_EGRESS_SUBNET:-192.168.64.96/28}"}]
+  build-egress:
+    name: ritsdev_build_egress
+    ipam:
+      config: [{subnet: "${BUILD_EGRESS_SUBNET:-192.168.64.112/28}"}]
+  # Carries only the control plane and the mail relay. Not internal, because
+  # the relay delivers by MX lookup; the relay's own config restricts which
+  # sources it will relay for, and no tenant runtime is ever attached here.
+  mail-control:
+    name: ritsdev_mail_control
+    ipam:
+      config: [{subnet: "${MAIL_CONTROL_SUBNET:-192.168.64.128/28}"}]
+
+x-logging: &default-logging
+  # The `local` driver, matching what the executor gives the containers it
+  # launches. It compresses rotated files, so max-file must be at least two;
+  # a value of one makes the container fail to start with an error about the
+  # logging driver rather than about the workload. That has cost two debugging
+  # sessions already.
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-platform-env: &platform-env
+  PLATFORM_ADMIN_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/postgres
+  PLATFORM_SESSION_SECRET: ${PLATFORM_SESSION_SECRET:?set PLATFORM_SESSION_SECRET}
+  SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:?set SECRET_ENCRYPTION_KEY}
+  # The domain this installation answers on. Required, and deliberately without
+  # a default: a wrong-but-plausible domain does not crash anything, it just
+  # puts another installation's name into links, mail headers, and health
+  # probes. Compose interpolates this whole file on every `up`, so an unset
+  # value stops the stack instead of starting a misconfigured one.
+  GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN to the domain this installation answers on, e.g. sites.example.org}
+  # Only needed when the public origin differs from the domain above, e.g.
+  # behind a proxy on another name. Otherwise derived as https://$GATEWAY_DOMAIN.
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+  # The zone visits are bucketed by day in. Required and undefaulted: UTC would
+  # not fail, it would re-bucket every day by this installation's offset and
+  # make rows written before the change incomparable with rows after it, every
+  # one of them still looking plausible.
+  ANALYTICS_TIMEZONE: ${ANALYTICS_TIMEZONE:?set ANALYTICS_TIMEZONE to this installation's IANA zone, e.g. Europe/Berlin}
+  SOURCE_ROOT: /data/sources
+  ARTIFACT_ROOT: /data/artifacts
+  RENDER_ROOT: /data/renders
+  # Gallery screenshots. Unlike /data/renders these have no expiry: they are the
+  # live picture of a listed project, and they are removed when the project
+  # leaves the showcase or is purged.
+  SHOWCASE_ROOT: /data/showcase
+  DUMP_ROOT: /data/dumps
+  DATA_ROOT: /data
+  # The executor runs as root and the control plane does not. Database exports
+  # are handed to this account so the control plane can stream them without
+  # making a file full of tenant rows world-readable.
+  PLATFORM_UID: ${PLATFORM_UID:-1000}
+  PLATFORM_GID: ${PLATFORM_GID:-1000}
+  # The executor publishes container health and per-runtime stats here, because
+  # only it holds the Docker socket; the control plane reads it when scraped.
+  EXECUTOR_METRICS_FILE: /data/metrics/executor.json
+  # Two cores: one heavy job (build, render, export) at a time is the real
+  # limit, with the second worker free for deploys and cold starts meanwhile.
+  EXECUTOR_CONCURRENCY: ${EXECUTOR_CONCURRENCY:-2}
+  EXECUTOR_HEAVY_CONCURRENCY: ${EXECUTOR_HEAVY_CONCURRENCY:-1}
+  EXECUTOR_LEASE_SECONDS: ${EXECUTOR_LEASE_SECONDS:-120}
+  METRICS_PORT: ${METRICS_PORT:-9090}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+  METRICS_ALLOWED_CIDRS: ${METRICS_ALLOWED_CIDRS:-}
+  ALLOW_UNAUTHENTICATED_METRICS: ${ALLOW_UNAUTHENTICATED_METRICS:-}
+  # Alerting. The relay is a sibling container on mail-control, so the SMTP hop
+  # never leaves the host and needs no TLS; that is why plaintext is opted into
+  # explicitly here rather than being a silent default.
+  MONITOR_ENABLED: ${MONITOR_ENABLED:-1}
+  MONITOR_INTERVAL_MS: ${MONITOR_INTERVAL_MS:-60000}
+  SMTP_HOST: ${SMTP_HOST:-smtp-relay}
+  SMTP_PORT: ${SMTP_PORT:-25}
+  SMTP_TLS: ${SMTP_TLS:-none}
+  SMTP_ALLOW_PLAINTEXT: ${SMTP_ALLOW_PLAINTEXT:-1}
+  # The name the control plane announces in HELO. The relay announces
+  # MAIL_HELO_NAME (see its `hostname:` below); absent an override the platform
+  # should say the same thing, so it defaults to that rather than to the public
+  # domain, whose forward DNS this host does not necessarily own. Read by
+  # smtpConfigFromEnv, and enumerated here because a variable this file does not
+  # list is simply undefined inside the container.
+  # How alerts leave the building: "smtp" or "cloudflare". Unset picks whichever
+  # is configured, preferring cloudflare, so an existing installation keeps the
+  # transport it already had. Naming one and not configuring it is refused
+  # rather than downgraded — silently posting alerts nowhere is the failure this
+  # is meant to prevent.
+  MAIL_TRANSPORT: ${MAIL_TRANSPORT:-}
+  CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID:-}
+  CLOUDFLARE_EMAIL_TOKEN: ${CLOUDFLARE_EMAIL_TOKEN:-}
+  CLOUDFLARE_API_BASE: ${CLOUDFLARE_API_BASE:-}
+  MAIL_TIMEOUT_MS: ${MAIL_TIMEOUT_MS:-15000}
+  SMTP_HELO_NAME: ${SMTP_HELO_NAME:-}
+  MAIL_HELO_NAME: ${MAIL_HELO_NAME:-}
+  # Must be a domain this host is entitled to send as. A domain publishing no
+  # SPF and no MX sends unauthenticated mail, liable to be junked; the host's
+  # own FQDN has matching forward and reverse DNS.
+  ALERT_FROM: ${ALERT_FROM:?set ALERT_FROM to an address at this host FQDN}
+  # Must be a domain whose MX this host can reach on port 25. Outbound 25 is
+  # blocked selectively on many networks, and silently.
+  ALERT_TO: ${ALERT_TO:-}
+  ALERT_RENOTIFY_MINUTES: ${ALERT_RENOTIFY_MINUTES:-360}
+  ALERT_THRESHOLDS: ${ALERT_THRESHOLDS:-}
+  GATEWAY_INTERNAL_URL: ${GATEWAY_INTERNAL_URL:-http://gateway:3001}
+  # Knobs the code has always read but this file never passed, so their
+  # fallbacks were the only reachable value. Listed with those same fallbacks:
+  # nothing changes, except that setting them now does something.
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_TIMEOUT_MS: ${SMTP_TIMEOUT_MS:-20000}
+  AUTH_DEV_BYPASS: ${AUTH_DEV_BYPASS:-}
+  ALLOW_EPHEMERAL_OAUTH_KEYS: ${ALLOW_EPHEMERAL_OAUTH_KEYS:-}
+  METRICS_PER_PROJECT: ${METRICS_PER_PROJECT:-}
+  MONITOR_METRICS_ENABLED: ${MONITOR_METRICS_ENABLED:-}
+  EXECUTOR_HEARTBEAT_MS: ${EXECUTOR_HEARTBEAT_MS:-15000}
+  EXECUTOR_HOUSEKEEPING_MS: ${EXECUTOR_HOUSEKEEPING_MS:-60000}
+  STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+  DATA_NETWORK: ${DATA_NETWORK:-data-control}
+  MC_CONFIG_DIR: ${MC_CONFIG_DIR:-/tmp/mc}
+  PG_DUMP_IMAGE: ${PG_DUMP_IMAGE:-postgres:16.9-alpine}
+  COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-ritsdev}
+  # The executor injects these two into runtimes that hold the LLM binding. They
+  # are not secrets; the admin credential that mints keys is set on the platform
+  # service alone, because the executor holds the Docker socket and never needs
+  # it — it only decrypts a key the platform already minted.
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_MODEL: ${LLM_MODEL:-Qwen3-30B-A3B-AWQ}
+
+services:
+  platform-data-init:
+    image: alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+    user: root
+    command: ["/bin/sh", "-c", "mkdir -p /data/sources /data/artifacts /data/renders /data/showcase /data/dumps /data/metrics /data/work && chown -R ${PLATFORM_UID:-1000}:${PLATFORM_GID:-1000} /data"]
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/platform:/data
+    network_mode: none
+    restart: "no"
+
+  rustfs-data-init:
+    image: alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+    user: root
+    command: ["/bin/sh", "-c", "mkdir -p /data && chown -R 10001:10001 /data"]
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/rustfs:/data
+    network_mode: none
+    restart: "no"
+
+  postgres:
+    image: postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/postgres:/var/lib/postgresql/data
+    networks: [data-control]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+
+  pgbouncer:
+    container_name: ritsdev-pgbouncer
+    image: edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      DB_NAME: "*"
+      LISTEN_PORT: "6432"
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "5"
+      RESERVE_POOL_SIZE: "2"
+    networks: [data-control]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+
+  rustfs:
+    container_name: ritsdev-rustfs
+    image: rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["/data"]
+    environment:
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY}
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/rustfs:/data
+    networks: [storage-control]
+    depends_on:
+      rustfs-data-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 256
+    security_opt: ["no-new-privileges:true"]
+
+  platform:
+    # Overridable so a deployment can run a published image instead of
+    # building: set PLATFORM_IMAGE and bring the stack up with --no-build.
+    image: ${PLATFORM_IMAGE:-ritsdev-platform:local}
+    build:
+      # Repository root so the image can bundle the CLI from this same tree.
+      context: ..
+      dockerfile: deploy/platform/Dockerfile
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["node", "--enable-source-maps", "dist/server.js"]
+    user: "${PLATFORM_UID:-1000}:${PLATFORM_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      <<: *platform-env
+      PORT: "3000"
+      PLATFORM_REPO_ROOT: /repo
+      TRUSTED_PROXY_CIDRS: ${ROOT_EDGE_SUBNET:-192.168.64.32/28},${PUBLIC_CONTROL_SUBNET:-192.168.64.80/28}
+      TRUSTED_CLOUDFLARE_PROXY_CIDRS: ${PUBLIC_CONTROL_SUBNET:-192.168.64.80/28}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?set GOOGLE_CLIENT_SECRET}
+      # Which email domains may sign in, comma-separated. Required, because a
+      # sign-in gate that falls open when unset is the one failure mode that
+      # looks like it is working. To run an installation open to any Google
+      # account, leave this empty and set AUTH_ALLOW_ANY_GOOGLE_DOMAIN=1, which
+      # is the same decision made out loud.
+      AUTH_ALLOWED_EMAIL_DOMAINS: ${AUTH_ALLOWED_EMAIL_DOMAINS:-}
+      AUTH_ALLOW_ANY_GOOGLE_DOMAIN: ${AUTH_ALLOW_ANY_GOOGLE_DOMAIN:-}
+      # Local brands a hosted page might impersonate: this organisation's name,
+      # and whatever it calls its accounts. ADDED to the built-in list of shared
+      # brands (Google, Microsoft, ...), never substituted for it, so leaving
+      # these empty weakens local coverage but cannot switch review off.
+      SITE_REVIEW_IMPERSONATION_TERMS: ${SITE_REVIEW_IMPERSONATION_TERMS:-}
+      SITE_REVIEW_CREDENTIAL_TERMS: ${SITE_REVIEW_CREDENTIAL_TERMS:-}
+      # The highest access tier an ordinary account may set: owner, network, or
+      # showcase. Defaults to showcase, the full ladder. Set it to `owner` on an
+      # installation open to sign-ups, where the gallery would otherwise carry a
+      # stranger's page to people who were not looking for it. Operators are
+      # exempt, so a capped installation can still list curated examples.
+      MAX_ACCESS_MODE: ${MAX_ACCESS_MODE:-showcase}
+      # Exactly these accounts hold the operator role after startup. Leave it
+      # empty to manage `accounts.platform_role` by hand, or through /v1/admin.
+      PLATFORM_OPERATOR_EMAILS: ${PLATFORM_OPERATOR_EMAILS:-}
+      # Exactly these accounts may write through /v1/admin. Granted here and
+      # nowhere else: the API refuses both to mint and to demote a superadmin.
+      PLATFORM_SUPERADMIN_EMAILS: ${PLATFORM_SUPERADMIN_EMAILS:-}
+      # Quotas. The default is written to a new account at first sign-in; the
+      # operator number is a floor applied at the create check and never stored.
+      # Both are read at startup, so a value the column would reject stops the
+      # start rather than the first registration after it.
+      DEFAULT_PROJECT_QUOTA: ${DEFAULT_PROJECT_QUOTA:-}
+      OPERATOR_PROJECT_QUOTA: ${OPERATOR_PROJECT_QUOTA:-}
+      # Optional: without it the platform still starts and `resources.llm`
+      # returns 503. Only this service can reach the proxy to mint keys.
+      LLM_ADMIN_KEY: ${LLM_ADMIN_KEY:-}
+      LLM_ADMIN_URL: ${LLM_ADMIN_URL:-}
+      # Every model a minted key may call, comma-separated. Only this service
+      # needs it: it is stamped onto the key at issuance and the proxy is what
+      # enforces it. Empty means the single `LLM_MODEL` above, which is what
+      # every key issued before this variable existed already carries.
+      LLM_MODELS: ${LLM_MODELS:-}
+      LLM_KEY_DURATION: ${LLM_KEY_DURATION:-90d}
+      LLM_TEAM_ID: ${LLM_TEAM_ID:-}
+      OAUTH_PRIVATE_KEY_FILE: /run/secrets/oauth-private.pem
+      OAUTH_PUBLIC_KEY_FILE: /run/secrets/oauth-public.pem
+      # Both only for the logged-out gallery on showcase.<domain>: the edge
+      # token proves the request came through Caddy, and the CIDRs are the same
+      # on-network test the gateway applies to a `network` site. Without them
+      # that surface is not mounted at all.
+      EDGE_PROXY_SECRET: ${EDGE_PROXY_SECRET:?set EDGE_PROXY_SECRET}
+      NETWORK_CIDRS: ${NETWORK_CIDRS:?set NETWORK_CIDRS}
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/platform:/data
+      - ../README.md:/repo/README.md:ro
+      - ../favicon.svg:/repo/favicon.svg:ro
+      - ../skills:/repo/skills:ro
+      - ${OAUTH_PRIVATE_KEY_HOST_FILE:?set OAUTH_PRIVATE_KEY_HOST_FILE}:/run/secrets/oauth-private.pem:ro
+      - ${OAUTH_PUBLIC_KEY_HOST_FILE:?set OAUTH_PUBLIC_KEY_HOST_FILE}:/run/secrets/oauth-public.pem:ro
+    networks: [data-control, root-edge, public-control, mail-control]
+    depends_on:
+      platform-data-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    mem_limit: 384m
+    cpus: 1
+    pids_limit: 256
+
+  gateway:
+    container_name: ritsdev-gateway
+    image: ritsdev-platform:local
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["node", "--enable-source-maps", "dist/gateway.js"]
+    user: "${PLATFORM_UID:-1000}:${PLATFORM_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      <<: *platform-env
+      GATEWAY_PORT: "3001"
+      EDGE_PROXY_SECRET: ${EDGE_PROXY_SECRET:?set EDGE_PROXY_SECRET}
+      NETWORK_CIDRS: ${NETWORK_CIDRS:?set NETWORK_CIDRS}
+      # The gateway joins every project bridge to proxy functions, so it must
+      # recognise and refuse tenant runtime peers itself.
+      RUNTIME_NETWORK_POOL: ${RUNTIME_NETWORK_POOL:-192.168.68.0/22}
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/platform:/data:ro
+    networks: [data-control, site-edge, render]
+    depends_on:
+      platform:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    mem_limit: 384m
+    cpus: 1
+    pids_limit: 256
+
+  # Built, never run as a service: the executor launches it per render job.
+  # It exists here so `docker compose build` produces it alongside the others.
+  render-image:
+    profiles: [images]
+    image: ${RENDER_IMAGE:-ritsdev-render:local}
+    build:
+      context: ./render
+      dockerfile: Dockerfile
+    command: ["true"]
+
+  build-proxy:
+    container_name: ritsdev-build-proxy
+    image: ritsdev-platform:local
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["node", "--enable-source-maps", "dist/build-proxy.js"]
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      BUILD_PROXY_PORT: "3128"
+      BUILD_PROXY_MAX_CONNECTIONS: "64"
+    networks: [build-egress, render]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3128/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+
+  executor:
+    image: ritsdev-platform:local
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["node", "--enable-source-maps", "dist/executor.js"]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /root/.mc:rw,noexec,nosuid,size=8m
+    cap_drop: [ALL]
+    # The executor must manage mode-0700 source/artifact trees owned by the
+    # directory-service PLATFORM_UID. Tenant runtime containers remain
+    # capability-free.
+    cap_add: [DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      <<: *platform-env
+      DATA_HOST_ROOT: ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/platform
+      POSTGRES_HOST: postgres
+      PGBOUNCER_HOST: pgbouncer
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      STORAGE_PUBLIC_ENDPOINT: http://rustfs:9000
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?set RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?set RUSTFS_SECRET_KEY}
+      GATEWAY_CONTAINER: ritsdev-gateway
+      PGBOUNCER_CONTAINER: ritsdev-pgbouncer
+      RUSTFS_CONTAINER: ritsdev-rustfs
+      BUILD_PROXY_CONTAINER: ritsdev-build-proxy
+      RENDER_NETWORK: ritsdev_render
+      RUNTIME_USER: "65532:65532"
+      NODE_BUILD_IMAGE: ${NODE_BUILD_IMAGE:-node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd}
+      DENO_RUNTIME_IMAGE: ${DENO_RUNTIME_IMAGE:-denoland/deno:2.9.4@sha256:c777b4b225501a61074837e90a826a58f99124837824023cd60334b1e2374498}
+      # Built from deploy/render: the upstream image has the browsers but not
+      # the playwright npm package the render script requires.
+      PLAYWRIGHT_IMAGE: ${PLAYWRIGHT_IMAGE:-ritsdev-render:local}
+      # The control plane, over data-control. The executor has no egress and
+      # cannot reach the LLM proxy itself, so a site review asks the platform
+      # for the model's opinion here. It stays that way on purpose: this
+      # container holds the Docker socket.
+      PLATFORM_INTERNAL_URL: ${PLATFORM_INTERNAL_URL:-http://platform:3000}
+      RUNTIME_NETWORK_POOL: ${RUNTIME_NETWORK_POOL:-192.168.68.0/22}
+      BUILD_NETWORK_POOL: ${BUILD_NETWORK_POOL:-192.168.72.0/24}
+      DYNAMIC_NETWORK_PREFIX: ${DYNAMIC_NETWORK_PREFIX:-28}
+      EXECUTOR_HEARTBEAT_FILE: /tmp/executor-heartbeat
+    volumes:
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/platform:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [data-control, storage-control]
+    depends_on:
+      platform:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+      build-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('fs').statSync('/tmp/executor-heartbeat');process.exit(Date.now()-s.mtimeMs<120000?0:1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 8
+    mem_limit: 512m
+    cpus: 1
+    # Two workers each spawn docker CLI processes, and a cold start issues a
+    # health-probe `docker exec` every 350ms for up to 90 seconds.
+    pids_limit: 512
+
+  caddy:
+    image: ${CADDY_IMAGE:-ritsdev-caddy:local}
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    logging: *default-logging
+    ports:
+      - "${LAN_BIND_IP:?set LAN_BIND_IP}:80:80"
+      - "${LAN_BIND_IP:?set LAN_BIND_IP}:443:443"
+      - "${LAN_BIND_IP:?set LAN_BIND_IP}:443:443/udp"
+    environment:
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN}
+      EDGE_PROXY_SECRET: ${EDGE_PROXY_SECRET:?set EDGE_PROXY_SECRET}
+      # Caddy substitutes {$VAR} before it parses, which is what makes a
+      # variable usable in a site address. Both must be passed here: the
+      # Caddyfile names them, and a name this service does not carry expands to
+      # nothing — leaving a config that parses into a server matching no host.
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN to the domain this installation answers on}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL to the address Let's Encrypt should contact}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/caddy/data:/data
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/caddy/config:/config
+      - ${DATA_HOST_ROOT:?set DATA_HOST_ROOT}/caddy/logs:/var/log/caddy
+    networks: [root-edge, site-edge, certificate-egress]
+    depends_on:
+      platform:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 3s
+      retries: 8
+    mem_limit: 192m
+    cpus: 1
+    pids_limit: 256
+
+  # The tunnel must be configured with one public hostname only:
+  # $GATEWAY_DOMAIN -> http://platform:3000. Never add a wildcard ingress.
+  smtp-relay:
+    container_name: ritsdev-smtp-relay
+    image: ${SMTP_RELAY_IMAGE:-wodby/opensmtpd:7}
+    # This host's real fully qualified name, which OpenSMTPD announces in HELO.
+    # Without it the HELO is the container id, which is not fully qualified and
+    # which receiving MTAs penalise or refuse. It must match the forward and
+    # reverse DNS of the address this host sends from.
+    hostname: ${MAIL_HELO_NAME:?set MAIL_HELO_NAME to this host FQDN, e.g. the output of `hostname -f`}
+    restart: unless-stopped
+    logging: *default-logging
+    # No published port. The only way in is the mail-control network, and the
+    # relay config narrows that further to the control plane's subnet.
+    networks: [mail-control]
+    volumes:
+      - ./smtp/smtpd.conf:/etc/smtpd/smtpd.custom.conf:ro
+      - smtp-spool:/var/spool/smtpd
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 64
+
+  cloudflared:
+    profiles: [public]
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.7.2@sha256:4f6655284ab3d252b7f28fedb19fe6c8fc82ee5b1295c20ac74d475e5398a52d}
+    restart: unless-stopped
+    logging: *default-logging
+    # Deliberately no --metrics and no healthcheck. The image is distroless, so
+    # a compose healthcheck could only prove the binary runs; and cloudflared's
+    # metrics listener also serves Go pprof, which can dump process memory —
+    # and this process holds the tunnel token, which has leaked once already.
+    # The control plane instead fetches its own public URL, which proves the
+    # whole path end to end: DNS, the Cloudflare edge, the tunnel, and the app.
+    # Never `docker inspect` this container: the token is in the command line.
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN}"]
+    networks: [public-control]
+    depends_on:
+      platform:
+        condition: service_healthy
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+
+volumes:
+  # The relay's queue. Persisted so a restart does not lose alerts that were
+  # accepted but not yet delivered.
+  smtp-spool:
